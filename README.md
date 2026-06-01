@@ -137,11 +137,11 @@ cd project-cortex
 
 ```bash
 # Copy the server to your machine
-scp -r pi-server/ YOU@YOUR_CEREBRO_IP:~/kira-server/
+scp -r pi-server/ YOU@YOUR_CEREBRO_IP:~/cerebro/
 
 # SSH in and set up the service
 ssh YOU@YOUR_CEREBRO_IP
-cd ~/kira-server
+cd ~/cerebro
 
 # Install dependencies
 pip3 install flask faster-whisper gtts requests pytz
@@ -154,8 +154,8 @@ nano cerebro.py
 
 # Install as a service
 sudo cp cerebro.service /etc/systemd/system/
-sudo systemctl enable kira
-sudo systemctl start kira
+sudo systemctl enable cerebro
+sudo systemctl start cerebro
 
 # Verify it's running
 curl http://localhost:5005/health
@@ -290,7 +290,7 @@ No reflash needed — just edit the file on the SD card.
 
 ### Server (`cerebro.py`)
 
-Restart service after changes: `sudo systemctl restart kira`
+Restart service after changes: `sudo systemctl restart cerebro`
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -348,7 +348,7 @@ Restart service after changes: `sudo systemctl restart kira`
 - Serial output will show `[SD] No config` if not found
 
 ### "Pi offline!" on screen
-- Check service: `sudo systemctl status kira`
+- Check service: `sudo systemctl status cerebro`
 - Check from robot's network: `http://YOUR_CEREBRO_IP:5005/health`
 - Check firewall allows port 5005
 
@@ -463,6 +463,6 @@ MIT — do whatever you want with it. If you build something cool, share it!
 
 This started as a "wouldn't it be fun" project and turned into something that genuinely gets used every day. The robots greet us in the morning, tell my son dinosaur facts, have dance parties, and go to sleep at bedtime without needing any apps or subscriptions.
 
-Built with a lot of help from Claude. Helped With Avatar and StackChan-BSP 🤖
+Built with help from Claude — who also helped wrangle the Avatar and StackChan-BSP libraries into submission. 🤖
 
 If you build your own version, open an issue or discussion — would love to see what people make.
