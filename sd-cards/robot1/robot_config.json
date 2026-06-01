@@ -1,0 +1,21 @@
+{
+  "robot_id": "robot1",
+  "robot_name": "Kira",
+  "default_mode": "adult",
+  "led_color": "purple",
+  "has_kid_mode": false,
+  "kid_name": "",
+  "speaker_volume": 180,
+  "vad_threshold": 1100,
+  "vad_silence_ms": 1400,
+  "vad_max_secs": 8,
+  "wifi_networks": [
+    {
+      "ssid": "YOUR_WIFI_NETWORK",
+      "password": "YOUR_WIFI_PASSWORD",
+      "pi_ip": "YOUR_CEREBRO_IP",
+      "pi_port": 5005,
+      "label": "home"
+    }
+  ]
+}

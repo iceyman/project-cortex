@@ -1,0 +1,14 @@
+[Unit]
+Description=Project Cortex — Cerebro
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/kira-server
+ExecStart=/home/YOUR_USERNAME/kira-server/venv/bin/python cerebro.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

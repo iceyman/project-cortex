@@ -1,0 +1,21 @@
+{
+  "robot_id": "robot2",
+  "robot_name": "Rumi",
+  "default_mode": "kid",
+  "led_color": "teal",
+  "has_kid_mode": true,
+  "kid_name": "YOUR_SONS_NAME",
+  "speaker_volume": 200,
+  "vad_threshold": 500,
+  "vad_silence_ms": 1800,
+  "vad_max_secs": 10,
+  "wifi_networks": [
+    {
+      "ssid": "YOUR_WIFI_NETWORK",
+      "password": "YOUR_WIFI_PASSWORD",
+      "pi_ip": "YOUR_CEREBRO_IP",
+      "pi_port": 5005,
+      "label": "home"
+    }
+  ]
+}
