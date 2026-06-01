@@ -463,6 +463,6 @@ MIT — do whatever you want with it. If you build something cool, share it!
 
 This started as a "wouldn't it be fun" project and turned into something that genuinely gets used every day. The robots greet us in the morning, tell my son dinosaur facts, have dance parties, and go to sleep at bedtime without needing any apps or subscriptions.
 
-Built with a lot of help from Claude. 🤖
+Built with a lot of help from Claude. Helped With Avatar and StackChan-BSP 🤖
 
 If you build your own version, open an issue or discussion — would love to see what people make.
