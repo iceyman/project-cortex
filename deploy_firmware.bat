@@ -1,6 +1,6 @@
 @echo off
 :: ════════════════════════════════════════════════════════
-::  Project Cortex — deploy_firmware.bat
+::  Project Cortex - deploy_firmware.bat
 ::  Patches FIRMWARE_VERSION, prompts rebuild, uploads
 ::  to Cerebro for OTA distribution to both robots.
 ::
@@ -10,8 +10,8 @@
 ::  Put this file in your m5stack\ folder
 :: ════════════════════════════════════════════════════════
 
-set CEREBRO=192.168.50.188:5005
-set KEY=kira_ota_2024
+set CEREBRO=YOUR_CEREBRO_IP:5005
+set KEY=change_this_key
 set BIN=.pio\build\m5stack-cores3\firmware.bin
 set SRC=src\main.cpp
 
@@ -23,9 +23,9 @@ if "%~1"=="" (
 )
 
 echo.
-echo  ══════════════════════════════════════════
-echo   Project Cortex — Firmware Deploy
-echo  ══════════════════════════════════════════
+echo  ===========================================
+echo   Project Cortex - Firmware Deploy
+echo  ===========================================
 echo  Version : %VERSION%
 echo  Cerebro : %CEREBRO%
 echo.
@@ -72,9 +72,9 @@ curl -s -X POST "http://%CEREBRO%/ota/upload?robot_id=robot1&version=%VERSION%&k
 echo.
 curl -s -X POST "http://%CEREBRO%/ota/upload?robot_id=robot2&version=%VERSION%&key=%KEY%" --data-binary @"%BIN%"
 echo.
-echo  ══════════════════════════════════════════
+echo  ===========================================
 echo   Done! Both robots update on next boot.
 echo   Version: %VERSION%
-echo  ══════════════════════════════════════════
+echo  ===========================================
 echo.
 pause

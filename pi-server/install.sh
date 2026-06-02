@@ -10,7 +10,7 @@ set -e
 CEREBRO_IP="YOUR_CEREBRO_IP"
 CEREBRO_HOST="cerebro"
 TIMEZONE="Australia/Brisbane"
-USER_HOME="/home/YOUR_USERNAME"
+USER_HOME="/home/$(whoami)"
 SERVER_DIR="$USER_HOME/kira-server"
 
 echo ""

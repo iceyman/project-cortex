@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=YOUR_USERNAME
-WorkingDirectory=/home/YOUR_USERNAME/kira-server
-ExecStart=/home/YOUR_USERNAME/kira-server/venv/bin/python cerebro.py
+WorkingDirectory=/home/YOUR_USERNAME/cerebro
+ExecStart=/home/YOUR_USERNAME/cerebro/venv/bin/python /home/YOUR_USERNAME/cerebro/cerebro.py
 Restart=on-failure
 RestartSec=5
 

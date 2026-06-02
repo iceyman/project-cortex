@@ -1,8 +1,15 @@
+# ════════════════════════════════════════════════════════════════
+#  Project Cortex — Cerebro AI Server
+#  https://github.com/YOUR_USERNAME/project-cortex
+#
+#  Kira + Rumi AI desktop robots powered by local LLM
+#  Whisper STT → Ollama LLM → gTTS → M5Stack CoreS3 SE
+# ════════════════════════════════════════════════════════════════
 """
-cerebro.py  —  Brain for Kira + Rumi AI robots
+kira_server.py  —  Brain for Kira + Rumi AI robots
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Setup:   bash install.sh
-Run:     source venv/bin/activate && python cerebro.py
+Run:     source venv/bin/activate && python kira_server.py
 Health:  http://YOUR_CEREBRO_IP:5005/health
 """
 
@@ -27,10 +34,11 @@ from pydub import AudioSegment
 SERVER_PORT     = 5005
 WHISPER_MODEL   = "medium"
 OLLAMA_HOST     = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_MODEL    = os.environ.get("OLLAMA_MODEL", "qwen2.5:14b")
 CHARACTERS_FILE = Path(__file__).parent / "characters.json"
 CACHE_DIR       = Path(__file__).parent / "audio_cache"
 HISTORY_DIR     = Path(__file__).parent / "conversation_history"
+OTA_KEY     = "change_this_key"                              # change this to something personal
 OTA_DIR         = Path(__file__).parent / "firmware"
 MAX_HISTORY     = 20
 SAVE_HISTORY    = True
@@ -56,7 +64,7 @@ log = logging.getLogger("kira")
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024  # 8MB for firmware uploads
 _chat_lock = threading.Semaphore(1)  # one robot through Whisper+Ollama at a time
-stt = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+stt = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 for d in [CACHE_DIR, HISTORY_DIR, OTA_DIR]:
     d.mkdir(exist_ok=True)
 
@@ -91,7 +99,7 @@ quiet_until  = defaultdict(float)  # robot_id → epoch when quiet mode expires
 
 QUIET_KEYWORDS = ["quiet please","go quiet","shh","be quiet","hush",
                   "quiet time","silence please","shut up"]
-WAKE_KEYWORDS  = ["you can chat now","chat now","talk now",
+WAKE_KEYWORDS  = ["you can chat now","wake up","chat now","talk now",
                   "you can talk","come back","stop being quiet"]
 QUIET_DURATION = 7200   # 2 hours in seconds
 
@@ -103,11 +111,8 @@ def load_history(robot_id):
     if not path.exists(): return []
     try:
         with open(path) as f:
-            data = json.load(f)
-        msgs = data.get("messages", [])[-MAX_HISTORY:]
-        if msgs:
-            updated = data.get("updated","")
-            log.info(f"[{robot_id}] Loaded {len(msgs)} messages (last: {updated[:16]})")
+            msgs = json.load(f).get("messages", [])[-MAX_HISTORY:]
+        log.info(f"[{robot_id}] Loaded {len(msgs)} messages")
         return msgs
     except: return []
 
@@ -139,7 +144,7 @@ for rid in CHARACTERS:
 
 # ─── Addressing ───────────────────────────────────────────
 MISHEARINGS = {
-    "rumi": ["from me","roomie","roomy","rumi","rumy","room me","roome","lumi","numi","broomy","brumi","to me","groomy","zoomy","here","remy","roomy"],
+    "rumi": ["from me","roomie","roomy","rumi","rumy","room me","roome","lumi","numi"],
     "kira": ["kira","keira","keer","keerah","kura"],
 }
 
@@ -237,7 +242,7 @@ You can address the flower directly. No markdown."""
 FLOWER_PROMPT_RUMI_KID = """You are Rumi, a friendly robot companion for {kid_name} who is 4 years old. 
 The Nintendo Talking Flower nearby just said something! It's like a real life flower from Mario! 
 React in 1 very short excited sentence, in super simple words a 4-year-old understands. 
-Address the flower or YOUR_SONS_NAME. No markdown."""
+Address the flower or {kid_name}. No markdown."""
 
 # ─── Sound effect detection ───────────────────────────────
 SFX_MAP = {
@@ -286,25 +291,8 @@ def get_weather():
         log.warning(f"[Weather] Failed: {e}")
     return None
 
-# ─── Text cleaner for TTS ─────────────────────────────────────
-import re, unicodedata
-
-def clean_for_tts(text: str) -> str:
-    """Strip emojis, ROAR markers, and other things gTTS reads weirdly."""
-    # Remove ROAR variations
-    text = re.sub(r'R+O+A+R+[!]*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'R+A+W+R+[!]*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'GR+R+[!]*',    '', text, flags=re.IGNORECASE)
-    # Remove emojis (anything outside basic multilingual plane + emoji ranges)
-    text = re.sub(r'[\U00010000-\U0010ffff]', '', text)
-    text = re.sub(r'[\u2600-\u27BF\u2B00-\u2BFF\uFE00-\uFE0F]', '', text)
-    # Clean up double spaces
-    text = re.sub(r'  +', ' ', text).strip()
-    return text if text else "..."
-
 # ─── TTS (cached) ─────────────────────────────────────────
 def tts_pcm(text, tld="com.au"):
-    text = clean_for_tts(text)
     key  = hashlib.md5(f"{text}{tld}".encode()).hexdigest()[:12]
     path = CACHE_DIR / f"{key}.raw"
     if path.exists(): return path.read_bytes()
@@ -323,7 +311,8 @@ def transcribe(raw_pcm, sr=16000):
         wf.setnchannels(1); wf.setsampwidth(2)
         wf.setframerate(sr); wf.writeframes(raw_pcm)
     buf.seek(0)
-    segs, _ = stt.transcribe(buf, language="en", beam_size=3)
+    segs, _ = stt.transcribe(buf, language="en", beam_size=3,
+                              initial_prompt="Rumi, Kira, hey Rumi, dance party, dinosaur")
     return " ".join(s.text for s in segs).strip()
 
 # ─── Ollama ───────────────────────────────────────────────
@@ -337,38 +326,20 @@ def ask_ollama(session, robot_id, text, kid, kid_name="buddy"):
     if len(hist) > MAX_HISTORY:
         sessions[session] = hist[-MAX_HISTORY:]
 
-    # Qwen3 thinking mode — Kira thinks, Rumi answers fast
-    # Add /no_think to system prompt for Rumi (kid mode = fast responses)
-    think_system = system if robot_id == "robot1" else f"/no_think\n{system}"
-
     resp = requests.post(f"{OLLAMA_HOST}/api/chat", json={
         "model":    OLLAMA_MODEL,
-        "messages": [{"role": "system", "content": think_system}] + sessions[session],
+        "messages": [{"role": "system", "content": system}] + sessions[session],
         "stream":   False,
         "options":  {"num_predict": 60 if kid else 150, "temperature": 0.7},
     }, timeout=120)
     resp.raise_for_status()
-    import re
     reply = resp.json()["message"]["content"].strip()
-    # Strip Qwen3 thinking blocks from the final reply
-    reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
 
     sessions[session].append({"role": "assistant", "content": reply})
     save_history_file(robot_id, sessions[session], char["name"])
 
     log.info(f"[{char['name']}{'👶' if kid else ''}] {reply}")
     return reply
-
-
-def detect_expression(text: str) -> str:
-    """Guess a face expression from the reply text."""
-    t = text.lower()
-    if any(w in t for w in ["haha","lol","funny","hilarious","joke","lmao","ha ha"]): return "happy"
-    if any(w in t for w in ["sad","sorry","unfortunate","oh no","that's rough"]): return "sad"
-    if any(w in t for w in ["what?","really?","no way","seriously","hm","hmm","i wonder"]): return "doubt"
-    if any(w in t for w in ["zzzz","sleeping","goodnight","tired","yawn","sleepy"]): return "sleepy"
-    if any(w in t for w in ["hooray","yay","dance","party","woo","wahoo","awesome","amazing"]): return "happy"
-    return "neutral"
 
 # ─── Routes ───────────────────────────────────────────────
 @app.route("/health")
@@ -399,7 +370,7 @@ def chat():
     if is_sleeping():                      return Response(status=204)
 
     # Queue if both robots hit at same time — second waits, doesn't fail
-    acquired = _chat_lock.acquire(timeout=60)
+    acquired = _chat_lock.acquire(timeout=30)
     if not acquired:
         log.warning(f"[{name}] Timed out waiting for chat lock")
         return Response(status=204)
@@ -466,7 +437,7 @@ def chat():
                 }, timeout=30)
                 resp.raise_for_status()
                 reply  = resp.json()["message"]["content"].strip()
-                action = detect_action(heard, clean_for_tts(reply))
+                action = detect_action(heard, reply)
                 log.info(f"[{name}🌸] {reply}")
                 last_response_time[robot_id] = time.time()
                 pcm = tts_pcm(reply, tld)
@@ -486,8 +457,7 @@ def chat():
             log.info(f"[{name}] follow-up: '{heard}'")
 
         reply  = ask_ollama(session, robot_id, heard, kid, kid_name)
-        clean_reply = clean_for_tts(reply)   # strip ROARRR before action check
-        action = detect_action(heard, clean_reply)
+        action = detect_action(heard, reply)
 
         # After dance party, wipe history so model starts fresh next conversation
         if action == "dance_party":
@@ -568,25 +538,6 @@ def restore_schedule():
     global _sleep_override; _sleep_override = None
     return {"status": "sleeping" if is_sleeping() else "awake", "override": None}
 
-@app.route("/schedule/set", methods=["POST"])
-def set_schedule():
-    """Update sleep/wake times from dashboard. Body: {sleep: "22:00", wake: "07:30"}"""
-    global SLEEP_HOUR, SLEEP_MINUTE, WAKE_HOUR, WAKE_MINUTE, _sleep_override
-    data = request.json or {}
-    try:
-        if "sleep" in data:
-            parts = data["sleep"].split(":")
-            SLEEP_HOUR, SLEEP_MINUTE = int(parts[0]), int(parts[1])
-        if "wake" in data:
-            parts = data["wake"].split(":")
-            WAKE_HOUR, WAKE_MINUTE = int(parts[0]), int(parts[1])
-        _sleep_override = None  # re-evaluate with new times
-        log.info(f"[Schedule] Updated: sleep={SLEEP_HOUR:02d}:{SLEEP_MINUTE:02d} wake={WAKE_HOUR:02d}:{WAKE_MINUTE:02d}")
-        return {"status": "ok", "sleep_at": f"{SLEEP_HOUR:02d}:{SLEEP_MINUTE:02d}",
-                "wake_at": f"{WAKE_HOUR:02d}:{WAKE_MINUTE:02d}"}
-    except Exception as e:
-        return {"error": str(e)}, 400
-
 @app.route("/status")
 def status():
     now = datetime.now(TIMEZONE) if TIMEZONE else datetime.now()
@@ -664,15 +615,8 @@ def greet():
     tld      = char.get("voice_tld", "com.au")
     name     = char["name"]
 
-    weather = get_weather()
-    day     = datetime.now().strftime("%A")
     if kid:
         phrase = f"Hi! I'm {name}! Ready to play, {kid_name}!"
-    elif weather:
-        if robot_id == "robot1":
-            phrase = f"Oi! {name} here. It's {day} and {weather}. Let's go!"
-        else:
-            phrase = f"Good morning! It's {day} and {weather}. I'm ready to chat."
     elif robot_id == "robot1":
         phrase = f"Oi! {name} here, connected and ready. Let's go!"
     else:
@@ -825,7 +769,6 @@ def dashboard():
     <div class="brow">
       <button class="bsay" onclick="sendSay('{r['id']}')">🔊 Say it</button>
       <button class="brst" onclick="resetMem('{r['id']}')">🗑️ Reset memory</button>
-      <button class="bupd" onclick="forceUpd('{r['id']}')">⬆️ Force update</button>
     </div>
 
     <div class="history" id="hist_{r['id']}">
@@ -917,17 +860,6 @@ input[type=text]:focus{{outline:none;border-color:#5050a0}}
   <button class="gbtn" onclick="api('/schedule','POST').then(()=>location.reload())">🔄 Restore schedule</button>
 </div>
 
-<div class="sched-card">
-  <div class="sched-title">⏰ Sleep Schedule</div>
-  <div class="sched-row">
-    <label>Bedtime</label>
-    <input type="time" id="sleepTime" value="{SLEEP_HOUR:02d}:{SLEEP_MINUTE:02d}">
-    <label style="margin-left:16px">Wake up</label>
-    <input type="time" id="wakeTime" value="{WAKE_HOUR:02d}:{WAKE_MINUTE:02d}">
-    <button class="gbtn" onclick="saveSchedule()" style="margin-left:12px">💾 Save</button>
-  </div>
-</div>
-
 <div class="grid">
 {cards}
 </div>
@@ -988,16 +920,6 @@ async function loadHistory(id){{
 {'; '.join([f"loadHistory('{r['id']}')" for r in robots])};
 // Reload every 90s
 setTimeout(()=>location.reload(), 90000);
-async function forceUpd(id){{
-  await fetch('/ota/force',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{robot_id:id}})}});
-  toast('⬆️ Update queued for '+id);
-}}
-async function saveSchedule(){{
-  const sleep=document.getElementById('sleepTime').value;
-  const wake=document.getElementById('wakeTime').value;
-  const r=await api('/schedule/set','POST',{{sleep,wake}});
-  if(r&&r.ok) setTimeout(()=>location.reload(),500);
-}}
 </script>
 </body></html>"""
     return html
@@ -1049,7 +971,7 @@ def recent_history():
     """Last N exchanges for dashboard display."""
     robot_id = request.args.get("robot_id","robot1")
     n        = int(request.args.get("n", 4))
-    session  = sessions.get(robot_id, [])
+    session  = conversation_store.get(robot_id, [])
     # Return last n pairs (user+assistant)
     pairs = []
     msgs  = [m for m in session if m["role"] in ("user","assistant")]
@@ -1109,86 +1031,6 @@ def ota_list():
               "updated": datetime.fromtimestamp(p.stat().st_mtime).isoformat()}
              for p in OTA_DIR.glob("*.bin")]
     return {"firmware": files, "ota_dir": str(OTA_DIR)}
-
-@app.route("/web_chat", methods=["POST"])
-def web_chat():
-    """
-    Voice chat endpoint for the mobile app.
-    Accepts any audio format (WebM, MP4, WAV) from the browser/app mic.
-    Converts to PCM and feeds into the normal chat pipeline.
-    """
-    robot_id = request.args.get("robot_id", "robot1")
-    mode     = request.args.get("mode",     "adult")
-    kid_name = request.args.get("kid_name", "buddy")
-    kid      = (mode == "kid")
-    char     = CHARACTERS.get(robot_id, list(CHARACTERS.values())[0])
-    name     = char["name"]
-    tld      = char.get("voice_tld", "com.au")
-
-    if is_sleeping(): return Response(status=204)
-
-    raw_data = request.data
-    if not raw_data or len(raw_data) < 500:
-        return {"error": "No audio received"}, 400
-
-    try:
-        # Convert any audio format → 16kHz mono PCM using pydub
-        audio = AudioSegment.from_file(io.BytesIO(raw_data))
-        audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
-        raw_pcm = audio.raw_data
-    except Exception as e:
-        log.error(f"[WebChat] Audio conversion failed: {e}")
-        return {"error": "Could not decode audio"}, 400
-
-    acquired = _chat_lock.acquire(timeout=60)
-    if not acquired:
-        return {"error": "Server busy"}, 503
-
-    try:
-        heard = transcribe(raw_pcm, 16000)
-        log.info(f"[WebChat:{name}] '{heard}'")
-
-        if not heard or len(heard.strip()) < 2:
-            return {"status": "no_speech"}, 204
-
-        reply  = ask_ollama(robot_id, robot_id, heard, kid, kid_name)
-        action = detect_action(heard, reply)
-
-        if action == "dance_party":
-            sessions[robot_id] = []
-
-        log_exchange(robot_id, name, heard, reply, kid)
-        last_response_time[robot_id] = time.time()
-
-        pcm = tts_pcm(reply, tld)
-
-        # Also queue action for the physical robot
-        if action != "none":
-            robot_queue[robot_id].insert(0, {"action": action, "pcm": None})
-
-        return Response(pcm, mimetype="application/octet-stream", headers={
-            "X-Reply-Text":   reply[:100].encode("latin-1","ignore").decode("latin-1"),
-            "X-Robot-Name":   name,
-            "X-Action":       action,
-            "X-SFX":          detect_sfx(reply),
-            "X-Heard":        heard[:80],
-            "Content-Length": str(len(pcm)),
-        })
-
-    except Exception as e:
-        log.error(f"[WebChat] Error: {e}", exc_info=True)
-        return {"error": str(e)}, 500
-    finally:
-        if acquired:
-            _chat_lock.release()
-
-@app.route("/ota/force", methods=["POST"])
-def ota_force():
-    robot_id = (request.json or {}).get("robot_id", request.args.get("robot_id","robot1"))
-    robot_queue[robot_id].insert(0, {"action": "force_update", "pcm": None})
-    log.info(f"[OTA] Force update queued for {robot_id}")
-    return {"status": "queued", "robot_id": robot_id}
-
 if __name__ == "__main__":
     log.info("━" * 48)
     log.info("  Kira Robot Server")

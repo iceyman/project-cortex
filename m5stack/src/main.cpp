@@ -12,7 +12,7 @@
 #include <HTTPUpdate.h>
 
 // ── Firmware version — bump this string before deploying to Cerebro ──────
-#define FIRMWARE_VERSION "1.0.0"  // Bump before each deploy
+#define FIRMWARE_VERSION "2026.05.31.2313"
 
 using namespace m5avatar;
 
@@ -24,7 +24,7 @@ using namespace m5avatar;
 #define TILT_HOME     450
 #define TILT_MIN       50       // 5°  (safe min)
 #define TILT_MAX      850       // 85° (safe max)
-#define TILT_SAFE_MIN  50
+#define TILT_SAFE_MIN   0    // 0 = max droop for sleep
 #define TILT_SAFE_MAX 850
 #define SERVO_SPEED   500       // 0–1000
 
@@ -126,6 +126,10 @@ VadState vad=VAD_WAIT;
 int16_t* micBuf=nullptr; size_t micBufMax=0, micBufPos=0, micBufFinal=0;
 uint32_t vadPrimedAt=0, silenceAt=0;
 uint32_t lastIdleMove=0, lastIdleExpr=0, lastIdleSpeak=0;
+uint32_t lastMicroMove=0;    // tiny constant drift
+uint32_t lastBigLook=0;      // deliberate looks around
+int8_t   idleScanDir=1;      // for slow scan behaviour
+uint8_t  idleBehaviour=0;    // current movement pattern
 uint32_t lastTouchMs=0, lastWifiCheck=0, lastTap=0, lastPickup=0;
 uint32_t lastDanceMs=0;  // prevents dance party spam
 bool     serverSleeping  = false;  // server says sleep hours
@@ -201,14 +205,30 @@ void doDance(int n){
     if(servoTaskH) vTaskResume(servoTaskH);
 }
 void doRoar(){
-    for(int i=0;i<6;i++){
-        int16_t pan = (i%2==0) ? -640 : 640;  // sharp left-right snaps
-        M5StackChan.Motion.moveX(pan, 1000);
-        sTgt.pan=pan; sCur.pan=pan;
-        delay(130);
+    // Must begin speaker — playBuf() releases it before action triggers
+    if(M5.Mic.isRunning()) M5.Mic.end();
+    delay(30);
+    M5.Speaker.begin();
+    M5.Speaker.setVolume(220);
+    int freqs[] = {520, 480, 420, 360, 300, 260, 220, 190};
+    int durs[]  = {80,  80,  100, 110, 120, 130, 150, 200};
+    for(int i=0;i<8;i++){
+        M5.Speaker.tone(freqs[i], durs[i]);
+        delay(durs[i]+10);
     }
-    M5StackChan.Motion.goHome();
-    sTgt={PAN_CENTER,TILT_CENTER}; sCur={PAN_CENTER,TILT_CENTER};
+    M5.Speaker.stop();
+    M5.Speaker.end();
+    delay(30);
+    M5.Mic.begin();
+    M5.Speaker.setVolume(180);
+
+    // Head shake
+    for(int i=0;i<6;i++){
+        sTgt.pan = (i%2==0) ? -500 : 500;
+        delay(160);
+    }
+    sTgt.pan=PAN_CENTER; sTgt.tilt=TILT_CENTER;
+    delay(200);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -325,11 +345,12 @@ void ledSpeaking() {
 
 TaskHandle_t mouthTaskH=nullptr;
 volatile bool mouthOn=false;
+extern float gMouthRatio;  // defined in kira_faces.h
 
 void mouthFn(void*){
   float t=0;
-  while(mouthOn){t+=0.3f;avatar.setMouthOpenRatio((sinf(t)+1.0f)*0.42f);sTgt.tilt=TILT_CENTER+sinf(t*0.5f)*14;vTaskDelay(pdMS_TO_TICKS(45));}
-  avatar.setMouthOpenRatio(0); mouthTaskH=nullptr; vTaskDelete(nullptr);
+  while(mouthOn){t+=0.15f;float target=(sinf(t)+1.0f)*0.28f;gMouthRatio=gMouthRatio*0.6f+target*0.4f;avatar.setMouthOpenRatio(gMouthRatio);sTgt.tilt=TILT_CENTER+sinf(t*0.4f)*8;vTaskDelay(pdMS_TO_TICKS(55));}
+  gMouthRatio=0.0f; avatar.setMouthOpenRatio(0); mouthTaskH=nullptr; vTaskDelete(nullptr);
 }
 void mouthStart(){if(mouthTaskH)return;mouthOn=true;xTaskCreatePinnedToCore(mouthFn,"mouth",2048,nullptr,1,&mouthTaskH,1);}
 void mouthStop(){mouthOn=false;}
@@ -381,6 +402,7 @@ void loadConfig(){
   if(doc["vad_threshold"].is<int>()) cfgVadThresh=doc["vad_threshold"];
   if(doc["vad_silence_ms"].is<int>()) cfgSilenceMs=doc["vad_silence_ms"];
   if(doc["vad_max_secs"].is<int>()) cfgMaxSecs=doc["vad_max_secs"];
+  if(doc["speaker_volume"].is<int>()) { int vol=doc["speaker_volume"]; M5.Speaker.setVolume(constrain(vol,0,255)); }
   loadNetworks(doc);
   Serial.printf("[Config] %s mode=%s vad=%d\n",cfgName,cfgMode,cfgVadThresh);
 }
@@ -470,7 +492,7 @@ void triggerAction(const String& action){
     avatar.setExpression(Expression::Doubt);
     xTaskCreatePinnedToCore([](void*){
         ledDinoRoar(); vTaskDelete(nullptr);
-    },"ledroar",1024,nullptr,1,nullptr,1);
+    },"ledroar",4096,nullptr,1,nullptr,1);
     doRoar(); avatar.setExpression(Expression::Neutral);
   }
 }
@@ -586,7 +608,7 @@ void sendAndRespond(){
   stopDanceMusic();
   state=THINKING;
   avatar.setExpression(Expression::Neutral); moveThink();
-  avatar.setSpeechText("Thinking...");
+  avatar.setSpeechText("");
   // Thinking — purple pulse on all 12 LEDs
   rgbAll(120, 0, 255);
 
@@ -649,7 +671,55 @@ const Expression EXPRS[]={Expression::Neutral,Expression::Happy,Expression::Neut
 
 void idleAnimate(){
   uint32_t now=millis();
-  if(now>lastIdleMove){lastIdleMove=now+2600+random(2400);moveTo(PAN_CENTER+random(-90,90),TILT_CENTER+random(-25,20));}
+
+  // ── Micro drift — tiny human-like fidgets every 0.5-1.2s ─────────────
+  if(now>lastMicroMove){
+    lastMicroMove = now + 1200 + random(1800);  // slower — every 1.2-3s
+    float np = sTgt.pan  + random(-6, 6);       // smaller drift
+    float nt = sTgt.tilt + random(-4, 4);
+    moveTo(np, nt);
+  }
+
+  // ── Behaviour patterns — deliberate movements every 2-5s ─────────────
+  if(now>lastIdleMove){
+    uint8_t b = random(0, 10);  // weighted random behaviours
+    switch(b){
+      case 0: case 1:  // Casual glance left (20%)
+        lastIdleMove = now + 1800 + random(1200);
+        moveTo(PAN_CENTER - 120 - random(60), TILT_CENTER + random(-8,12));
+        break;
+      case 2: case 3:  // Casual glance right (20%)
+        lastIdleMove = now + 1800 + random(1200);
+        moveTo(PAN_CENTER + 120 + random(60), TILT_CENTER + random(-8,12));
+        break;
+      case 4:          // Thinking — look down-left (10%)
+        lastIdleMove = now + 2500 + random(1500);
+        moveTo(PAN_CENTER - 130, TILT_CENTER - 40);
+        break;
+      case 5:          // Daydream — drift up slightly (10%)
+        lastIdleMove = now + 3000 + random(2000);
+        moveTo(PAN_CENTER + random(-40,40), TILT_CENTER + 50 + random(20));
+        break;
+      case 6:          // Alert — snap to attention, face forward (10%)
+        lastIdleMove = now + 1000 + random(600);
+        moveTo(PAN_CENTER + random(-20,20), TILT_CENTER + 20);
+        break;
+      case 7:          // Long look right then drift back (10%)
+        lastIdleMove = now + 2200 + random(1000);
+        moveTo(PAN_CENTER + 220 + random(40), TILT_CENTER + random(-10,10));
+        break;
+      case 8:          // Slow scan — advance scan position (10%)
+        lastIdleMove = now + 600 + random(400);
+        idleScanDir = (sTgt.pan > PAN_CENTER + 200) ? -1 : (sTgt.pan < PAN_CENTER - 200) ? 1 : idleScanDir;
+        moveTo(sTgt.pan + idleScanDir * (60 + random(40)), TILT_CENTER + random(-10,10));
+        break;
+      default:         // Return near centre — rest pose (10%)
+        lastIdleMove = now + 3500 + random(2500);
+        moveTo(PAN_CENTER + random(-30,30), TILT_CENTER + random(-10,20));
+        break;
+    }
+  }
+
   if(now>lastIdleExpr){lastIdleExpr=now+8000+random(7000);avatar.setExpression(EXPRS[random(0,6)]);}
   if(now>lastIdleSpeak&&wifiConnected){
     lastIdleSpeak=now+300000+random(240000);
@@ -681,7 +751,7 @@ void checkIMU(){
   float ax=d.accel.x,ay=d.accel.y,az=d.accel.z,mag=sqrtf(ax*ax+ay*ay+az*az);
   uint32_t now=millis();
   if(fabsf(mag-1.0f)>3.5f&&now-lastTap>3000){lastTap=now;avatar.setExpression(Expression::Doubt);moveSurprised();delay(350);avatar.setExpression(Expression::Neutral);moveCenter();}
-  if(mag<0.1f&&now-lastPickup>8000){lastPickup=now;avatar.setExpression(Expression::Doubt);avatar.setSpeechText("Whoa!");moveSurprised();delay(1000);avatar.setSpeechText("");moveCenter();avatar.setExpression(Expression::Neutral);}
+  if(mag<0.1f&&now-lastPickup>8000){lastPickup=now;avatar.setExpression(Expression::Doubt);avatar.setSpeechText("");moveSurprised();delay(1000);avatar.setSpeechText("");moveCenter();avatar.setExpression(Expression::Neutral);}
 }
 
 // ════════════════════════════════════════════════════════════
@@ -718,29 +788,34 @@ void setup(){
   bool isRumi = (strcmp(cfgLedCol,"teal")==0 || strcmp(cfgName,"Rumi")==0);
   uint16_t irisColor;
   if (isRumi) {
-    irisColor = M5.Lcd.color565(80, 45, 20);           // dark brown — like real Rumi Kang
+    irisColor = M5.Lcd.color565(180, 60, 200);         // Mirko violet
     palette.set(COLOR_PRIMARY,   M5.Lcd.color565(80,  45,  20));
     palette.set(COLOR_SECONDARY, M5.Lcd.color565(40,  20,   8));
   } else {
-    irisColor = M5.Lcd.color565(127, 119, 221);        // purple
+    irisColor = M5.Lcd.color565(120, 70, 230);         // bold purple
     palette.set(COLOR_PRIMARY,   M5.Lcd.color565(127, 119, 221));
     palette.set(COLOR_SECONDARY, M5.Lcd.color565(60,   50, 140));
   }
   // Background colour — Kira warm dark, Rumi pink
   if (isRumi) {
-    palette.set(COLOR_BACKGROUND, M5.Lcd.color565(255, 182, 213));  // soft pink
+    palette.set(COLOR_BACKGROUND, M5.Lcd.color565(255, 160, 200));  // vibrant Mirko pink
   } else {
-    palette.set(COLOR_BACKGROUND, M5.Lcd.color565(45,  35,  75));   // visible dark purple bg
+    palette.set(COLOR_BACKGROUND, M5.Lcd.color565(235, 225, 250));  // soft lavender bg
   }
   avatar.setColorPalette(palette);
 
-  // ── Clean 3D eyes + curved mouth
-  avatar.getFace()->setRightEye(new AnimeEye(false, irisColor));
-  avatar.getFace()->setLeftEye(new AnimeEye(true,  irisColor));
-  avatar.getFace()->setMouth(new AnimeMouth());
+  // ── Bold graphic eyes + mouth (Project Cortex style)
+  avatar.getFace()->setRightEye(new BigEye(false, irisColor));
+  avatar.getFace()->setLeftEye(new BigEye(true,  irisColor));
+  avatar.getFace()->setMouth(new BoldMouth());
 
-  // Add overlays before init — no race condition
-  avatar.addDrawable(new CharOverlay(isRumi));
+  // Face plate border + hair drawn first, details on top
+  avatar.addDrawable(new FacePlate(
+    isRumi ? M5.Lcd.color565(220, 60, 120) : M5.Lcd.color565(140, 90, 255),   // hot pink border : purple border
+    isRumi ? M5.Lcd.color565(255, 160, 200) : M5.Lcd.color565(235, 225, 250),  // Mirko pink : lavender bg
+    isRumi
+  ));
+  avatar.addDrawable(new CharDetails(isRumi));
 
   avatar.setExpression(Expression::Happy);
   moveSurprised();
@@ -819,8 +894,6 @@ void setup(){
   Serial.printf("[Boot] %s board=%d vad=%d\n",cfgName,(int)M5.getBoard(),cfgVadThresh);
   lastSleepCheck = 0;  // force immediate sleep check on first loop
 
-  // ── OTA check BEFORE avatar/servo tasks start — avoids flash conflicts ──
-  checkFirmwareUpdate();  // reboots automatically if update flashed
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1037,7 +1110,11 @@ void checkPendingMessages() {
     avatar.setExpression(Expression::Happy);
     mouthStart(); playBuf(buf,cLen); mouthStop();
     free(buf);
-    if(act!="none") triggerAction(act);
+    if(act=="force_update"){
+        Serial.println("[OTA] Force update requested from dashboard");
+        avatar.setExpression(Expression::Happy);
+        checkFirmwareUpdate();  // reboots if update found
+    } else if(act!="none") triggerAction(act);
     delay(400);
     avatar.setExpression(Expression::Neutral);
     M5.Mic.begin(); vad=VAD_WAIT;

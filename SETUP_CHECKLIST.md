@@ -12,7 +12,7 @@ Work through this top to bottom. Check each item off as you go.
 - [ ] `cerebro.py` — set `OLLAMA_MODEL` to match what you pulled
 - [ ] `characters.json` — set kid's name if using kid mode (replace `YOUR_SONS_NAME`)
 - [ ] `cerebro.service` — replace `YOUR_USERNAME` with your Linux username
-- [ ] Service installed: `sudo cp cerebro.service /etc/systemd/system/ && sudo systemctl enable kira && sudo systemctl start kira`
+- [ ] Service installed: `sudo cp cerebro.service /etc/systemd/system/ && sudo systemctl enable cerebro && sudo systemctl start cerebro`
 - [ ] Service running: `curl http://localhost:5005/health` returns JSON
 
 ## SD Cards
