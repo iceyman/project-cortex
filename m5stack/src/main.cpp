@@ -110,7 +110,7 @@ uint32_t lastCamFollow = 0;
 //  Config
 // ════════════════════════════════════════════════════════════
 char cfgRobotId[32]="robot1"; char cfgName[32]="Kira";
-char cfgPiIP[64]="YOUR_CEREBRO_IP"; int cfgPiPort=5005;
+char cfgPiIP[64]="192.168.50.111"; int cfgPiPort=5005;
 char cfgMode[16]="adult"; char cfgLedCol[16]="purple";
 bool cfgHasKid=false; char cfgKidName[32]="buddy";
 int cfgVadThresh=1100; int cfgSilenceMs=1400; int cfgMaxSecs=8;
@@ -1113,7 +1113,34 @@ void checkPendingMessages() {
     if(act=="force_update"){
         Serial.println("[OTA] Force update requested from dashboard");
         avatar.setExpression(Expression::Happy);
-        checkFirmwareUpdate();  // reboots if update found
+        checkFirmwareUpdate();
+    } else if(act=="reboot"){
+        Serial.println("[Dashboard] Reboot requested");
+        avatar.setExpression(Expression::Sleepy);
+        delay(2000);
+        ESP.restart();
+    } else if(act=="shutdown"){
+        Serial.println("[Dashboard] Sleep requested");
+        enterSleepMode();
+    } else if(act.startsWith("save_config:")){
+        String cfgJson = act.substring(12);
+        Serial.printf("[Config] Writing to SD: %s\n", cfgJson.c_str());
+        // Read existing config
+        File f = SD.open("/robot_config.json", FILE_READ);
+        JsonDocument doc;
+        if(f){ deserializeJson(doc, f); f.close(); }
+        // Parse and apply new values
+        JsonDocument patch;
+        if(deserializeJson(patch, cfgJson) == DeserializationError::Ok){
+            if(patch.containsKey("vad_threshold"))  { doc["vad_threshold"]  = patch["vad_threshold"];  cfgVadThresh = patch["vad_threshold"]; }
+            if(patch.containsKey("kid_name"))        { doc["kid_name"]        = patch["kid_name"].as<String>();  strlcpy(cfgKidName, patch["kid_name"].as<const char*>(), sizeof(cfgKidName)); }
+            if(patch.containsKey("speaker_volume"))  { doc["speaker_volume"]  = patch["speaker_volume"]; M5.Speaker.setVolume(constrain((int)patch["speaker_volume"],0,255)); }
+            if(patch.containsKey("default_mode"))    { doc["default_mode"]    = patch["default_mode"].as<String>();  strlcpy(cfgMode, patch["default_mode"].as<const char*>(), sizeof(cfgMode)); }
+            if(patch.containsKey("robot_name"))      { doc["robot_name"]      = patch["robot_name"].as<String>();    strlcpy(cfgName, patch["robot_name"].as<const char*>(),  sizeof(cfgName)); }
+            // Write back to SD
+            File fw = SD.open("/robot_config.json", FILE_WRITE);
+            if(fw){ serializeJson(doc, fw); fw.close(); Serial.println("[Config] SD card updated ✓"); }
+        }
     } else if(act!="none") triggerAction(act);
     delay(400);
     avatar.setExpression(Expression::Neutral);

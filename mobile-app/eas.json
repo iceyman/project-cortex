@@ -1,20 +1,8 @@
 {
-  "cli": {
-    "version": ">= 7.0.0"
-  },
+  "cli": {"version": ">= 7.0.0"},
   "build": {
-    "preview": {
-      "android": {
-        "buildType": "apk"
-      }
-    },
-    "production": {
-      "android": {
-        "buildType": "app-bundle"
-      }
-    }
+    "preview": {"android": {"buildType": "apk"}},
+    "production": {"android": {"buildType": "app-bundle"}}
   },
-  "submit": {
-    "production": {}
-  }
+  "submit": {"production": {}}
 }

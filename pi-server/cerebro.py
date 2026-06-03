@@ -237,7 +237,7 @@ You can address the flower directly. No markdown."""
 FLOWER_PROMPT_RUMI_KID = """You are Rumi, a friendly robot companion for {kid_name} who is 4 years old. 
 The Nintendo Talking Flower nearby just said something! It's like a real life flower from Mario! 
 React in 1 very short excited sentence, in super simple words a 4-year-old understands. 
-Address the flower or YOUR_SONS_NAME. No markdown."""
+Address the flower or YOUR_KIDS_NAME. No markdown."""
 
 # ─── Sound effect detection ───────────────────────────────
 SFX_MAP = {
@@ -305,6 +305,7 @@ def clean_for_tts(text: str) -> str:
 # ─── TTS (cached) ─────────────────────────────────────────
 def tts_pcm(text, tld="com.au"):
     text = clean_for_tts(text)
+    if not text or text.strip() == "": text = "..."
     key  = hashlib.md5(f"{text}{tld}".encode()).hexdigest()[:12]
     path = CACHE_DIR / f"{key}.raw"
     if path.exists(): return path.read_bytes()
@@ -317,6 +318,12 @@ def tts_pcm(text, tld="com.au"):
     return pcm
 
 # ─── STT ──────────────────────────────────────────────────
+# Common Whisper hallucinations — it outputs these on background noise
+WHISPER_HALLUCINATIONS = [
+    "thanks for watching", "thank you for watching",
+    "subscribe", "like and subscribe",
+]
+
 def transcribe(raw_pcm, sr=16000):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -324,7 +331,12 @@ def transcribe(raw_pcm, sr=16000):
         wf.setframerate(sr); wf.writeframes(raw_pcm)
     buf.seek(0)
     segs, _ = stt.transcribe(buf, language="en", beam_size=3)
-    return " ".join(s.text for s in segs).strip()
+    text = " ".join(s.text for s in segs).strip()
+    # Filter out known Whisper hallucinations
+    if text.lower().strip('!.,? ') in WHISPER_HALLUCINATIONS:
+        log.info(f"[Whisper] Filtered hallucination: '{text}'")
+        return ""
+    return text
 
 # ─── Ollama ───────────────────────────────────────────────
 def ask_ollama(session, robot_id, text, kid, kid_name="buddy"):
@@ -339,19 +351,29 @@ def ask_ollama(session, robot_id, text, kid, kid_name="buddy"):
 
     # Qwen3 thinking mode — Kira thinks, Rumi answers fast
     # Add /no_think to system prompt for Rumi (kid mode = fast responses)
-    think_system = system if robot_id == "robot1" else f"/no_think\n{system}"
+    think_system = system
 
     resp = requests.post(f"{OLLAMA_HOST}/api/chat", json={
         "model":    OLLAMA_MODEL,
         "messages": [{"role": "system", "content": think_system}] + sessions[session],
         "stream":   False,
+        "think":    False,
         "options":  {"num_predict": 60 if kid else 150, "temperature": 0.7},
     }, timeout=120)
     resp.raise_for_status()
     import re
     reply = resp.json()["message"]["content"].strip()
     # Strip Qwen3 thinking blocks from the final reply
+    # Strip think blocks — but if that leaves nothing, use what was inside them
+    raw_reply = reply
     reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
+    if not reply:
+        # Model put everything inside think tags — extract it
+        think_match = re.search(r'<think>(.*?)</think>', raw_reply, flags=re.DOTALL)
+        if think_match:
+            reply = think_match.group(1).strip()
+        if not reply:
+            reply = 'Hmm, let me think about that!'
 
     sessions[session].append({"role": "assistant", "content": reply})
     save_history_file(robot_id, sessions[session], char["name"])
@@ -462,6 +484,7 @@ def chat():
                     "messages": [{"role":"system","content":system},
                                  {"role":"user",  "content":flower_msg}],
                     "stream":   False,
+                    "think":    False,
                     "options":  {"num_predict": 60, "temperature": 0.9},
                 }, timeout=30)
                 resp.raise_for_status()
@@ -789,7 +812,12 @@ def dashboard():
         <span class="dot {'on' if r['online'] else 'off'}"></span>
         <span class="robot-name">{r['name']}</span>
       </div>
-      <span class="ver">v{r['version']}</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="online-badge {'online-yes' if r['online'] else 'online-no'}">
+          {'🟢 Online' if r['online'] else '🔴 Offline'}
+        </span>
+        <span class="ver">v{r['version']}</span>
+      </div>
     </div>
     <div style="margin-bottom:10px">
       <span class="badge {'asleep' if sleeping else 'awake'}">{('🌙 sleeping' if sleeping else '✅ awake')}</span>
@@ -826,6 +854,32 @@ def dashboard():
       <button class="bsay" onclick="sendSay('{r['id']}')">🔊 Say it</button>
       <button class="brst" onclick="resetMem('{r['id']}')">🗑️ Reset memory</button>
       <button class="bupd" onclick="forceUpd('{r['id']}')">⬆️ Force update</button>
+      <button class="brbt" onclick="rebootRobot('{r['id']}')">🔄 Reboot</button>
+      <button class="bsdn" onclick="shutdownRobot('{r['id']}')">⏹️ Sleep</button>
+    </div>
+
+    <div class="sdcard" id="sd_{r['id']}">
+      <div class="hist-title">💾 SD Card Settings</div>
+      <div class="sd-row">
+        <span class="lbl">Robot name</span>
+        <input type="text" id="sd_name_{r['id']}" class="sd-input" value="{r['name']}" placeholder="Kira">
+      </div>
+      <div class="sd-row">
+        <span class="lbl">VAD threshold <span class="sd-hint">(higher = less sensitive)</span></span>
+        <input type="number" id="sd_vad_{r['id']}" class="sd-input sd-num" min="200" max="3000" value="{'1100' if r['id']=='robot1' else '500'}">
+      </div>
+      <div class="sd-row">
+        <span class="lbl">Kid name</span>
+        <input type="text" id="sd_kid_{r['id']}" class="sd-input" placeholder="YOUR_KIDS_NAME">
+      </div>
+      <div class="sd-row">
+        <span class="lbl">Default mode</span>
+        <select id="sd_mode_{r['id']}" class="sd-input">
+          <option value="adult" {'selected' if r['mode']=='adult' else ''}>Adult</option>
+          <option value="kid"   {'selected' if r['mode']=='kid'   else ''}>Kid</option>
+        </select>
+      </div>
+      <button class="bsd" onclick="saveSDConfig('{r['id']}')">💾 Save to SD card</button>
     </div>
 
     <div class="history" id="hist_{r['id']}">
@@ -839,6 +893,7 @@ def dashboard():
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCIgd2lkdGg9IjQ4IiBoZWlnaHQ9IjQ4Ij4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iYmciIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdHlsZT0ic3RvcC1jb2xvcjojN2MzYWVkIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3R5bGU9InN0b3AtY29sb3I6I2VjNDg5OSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPCEtLSBCYWNrZ3JvdW5kIHJvdW5kZWQgc3F1YXJlIC0tPgogIDxyZWN0IHdpZHRoPSI0OCIgaGVpZ2h0PSI0OCIgcng9IjEyIiBmaWxsPSIjMWEwYTJlIi8+CiAgPCEtLSBGYWNlIHBsYXRlIC0tPgogIDxyZWN0IHg9IjUiIHk9IjgiIHdpZHRoPSIzOCIgaGVpZ2h0PSIzNSIgcng9IjgiIGZpbGw9IiNmMGU4ZmYiLz4KICA8cmVjdCB4PSI1IiB5PSI4IiB3aWR0aD0iMzgiIGhlaWdodD0iMzUiIHJ4PSI4IiBmaWxsPSJub25lIiBzdHJva2U9InVybCgjYmcpIiBzdHJva2Utd2lkdGg9IjEuNSIvPgogIDwhLS0gSGFpciAtLT4KICA8ZWxsaXBzZSBjeD0iMjQiIGN5PSI4IiByeD0iMTYiIHJ5PSI3IiBmaWxsPSIjN2MzYWVkIi8+CiAgPCEtLSBBaG9nZSAtLT4KICA8cmVjdCB4PSIyMiIgeT0iMSIgd2lkdGg9IjQiIGhlaWdodD0iOSIgcng9IjIiIGZpbGw9IiM2ZDI4ZDkiLz4KICA8Y2lyY2xlIGN4PSIyNCIgY3k9IjEiIHI9IjMiIGZpbGw9IiMwMGU1ZmYiLz4KICA8IS0tIEV5ZXMgLS0+CiAgPGNpcmNsZSBjeD0iMTYiIGN5PSIyNCIgcj0iNiIgZmlsbD0id2hpdGUiLz4KICA8Y2lyY2xlIGN4PSIxNiIgY3k9IjI0IiByPSIzLjUiIGZpbGw9IiM3YzNhZWQiLz4KICA8Y2lyY2xlIGN4PSIxNiIgY3k9IjI0IiByPSIxLjUiIGZpbGw9IiMxYTBhMmUiLz4KICA8Y2lyY2xlIGN4PSIxNC41IiBjeT0iMjIuNSIgcj0iMS4yIiBmaWxsPSJ3aGl0ZSIvPgogIDxjaXJjbGUgY3g9IjMyIiBjeT0iMjQiIHI9IjYiIGZpbGw9IndoaXRlIi8+CiAgPGNpcmNsZSBjeD0iMzIiIGN5PSIyNCIgcj0iMy41IiBmaWxsPSIjZWM0ODk5Ii8+CiAgPGNpcmNsZSBjeD0iMzIiIGN5PSIyNCIgcj0iMS41IiBmaWxsPSIjMWEwYTJlIi8+CiAgPGNpcmNsZSBjeD0iMzAuNSIgY3k9IjIyLjUiIHI9IjEuMiIgZmlsbD0id2hpdGUiLz4KICA8IS0tIEJsdXNoIC0tPgogIDxlbGxpcHNlIGN4PSI5IiBjeT0iMzAiIHJ4PSIzLjUiIHJ5PSIxLjgiIGZpbGw9IiNmZmIzZDEiIG9wYWNpdHk9IjAuNyIvPgogIDxlbGxpcHNlIGN4PSIzOSIgY3k9IjMwIiByeD0iMy41IiByeT0iMS44IiBmaWxsPSIjZmZiM2QxIiBvcGFjaXR5PSIwLjciLz4KICA8IS0tIFNtaWxlIC0tPgogIDxwYXRoIGQ9Ik0xOCAzNiBRMjQgNDAgMzAgMzYiIHN0cm9rZT0iI2UwNTA4MCIgc3Ryb2tlLXdpZHRoPSIxLjUiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDwhLS0gR2FtaW5nIGNsaXAgLS0+CiAgPHJlY3QgeD0iMzQiIHk9IjExIiB3aWR0aD0iNiIgaGVpZ2h0PSIzLjUiIHJ4PSIxLjUiIGZpbGw9IiNmOTczMTYiLz4KPC9zdmc+Cg==">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>🤖 Cerebro</title>
 <style>
@@ -899,13 +954,13 @@ input[type=text]:focus{{outline:none;border-color:#5050a0}}
 </style>
 </head>
 <body>
-<h1>🤖 Cerebro</h1>
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px"><div style="width:48px;height:48px;flex-shrink:0"><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 48 48\" width=\"48\" height=\"48\">  <defs>    <linearGradient id=\"bg\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">      <stop offset=\"0%\" style=\"stop-color:#7c3aed\"/>      <stop offset=\"100%\" style=\"stop-color:#ec4899\"/>    </linearGradient>  </defs>  <!-- Background rounded square -->  <rect width=\"48\" height=\"48\" rx=\"12\" fill=\"#1a0a2e\"/>  <!-- Face plate -->  <rect x=\"5\" y=\"8\" width=\"38\" height=\"35\" rx=\"8\" fill=\"#f0e8ff\"/>  <rect x=\"5\" y=\"8\" width=\"38\" height=\"35\" rx=\"8\" fill=\"none\" stroke=\"url(#bg)\" stroke-width=\"1.5\"/>  <!-- Hair -->  <ellipse cx=\"24\" cy=\"8\" rx=\"16\" ry=\"7\" fill=\"#7c3aed\"/>  <!-- Ahoge -->  <rect x=\"22\" y=\"1\" width=\"4\" height=\"9\" rx=\"2\" fill=\"#6d28d9\"/>  <circle cx=\"24\" cy=\"1\" r=\"3\" fill=\"#00e5ff\"/>  <!-- Eyes -->  <circle cx=\"16\" cy=\"24\" r=\"6\" fill=\"white\"/>  <circle cx=\"16\" cy=\"24\" r=\"3.5\" fill=\"#7c3aed\"/>  <circle cx=\"16\" cy=\"24\" r=\"1.5\" fill=\"#1a0a2e\"/>  <circle cx=\"14.5\" cy=\"22.5\" r=\"1.2\" fill=\"white\"/>  <circle cx=\"32\" cy=\"24\" r=\"6\" fill=\"white\"/>  <circle cx=\"32\" cy=\"24\" r=\"3.5\" fill=\"#ec4899\"/>  <circle cx=\"32\" cy=\"24\" r=\"1.5\" fill=\"#1a0a2e\"/>  <circle cx=\"30.5\" cy=\"22.5\" r=\"1.2\" fill=\"white\"/>  <!-- Blush -->  <ellipse cx=\"9\" cy=\"30\" rx=\"3.5\" ry=\"1.8\" fill=\"#ffb3d1\" opacity=\"0.7\"/>  <ellipse cx=\"39\" cy=\"30\" rx=\"3.5\" ry=\"1.8\" fill=\"#ffb3d1\" opacity=\"0.7\"/>  <!-- Smile -->  <path d=\"M18 36 Q24 40 30 36\" stroke=\"#e05080\" stroke-width=\"1.5\" fill=\"none\" stroke-linecap=\"round\"/>  <!-- Gaming clip -->  <rect x=\"34\" y=\"11\" width=\"6\" height=\"3.5\" rx=\"1.5\" fill=\"#f97316\"/></svg></div><h1 style="margin:0">Cerebro</h1></div>
 <div class="sub">{now} &nbsp;·&nbsp; 🌤️ {weather}</div>
 
 {"<div class='banner'>🌙 Sleep hours active — robots are in low-power mode</div>" if sleeping else ""}
 
 <div class="sbar">
-  <div class="si">Server <b>online</b></div>
+  <div class="si"><span style="color:#4caf50;font-size:.85rem">🟢</span> <b style="color:#4caf50">Cerebro Online</b></div>
   <div class="si">Model <b>{OLLAMA_MODEL}</b></div>
   <div class="si">Whisper <b>{WHISPER_MODEL}</b></div>
   <div class="si">Sleep <b>{SLEEP_HOUR:02d}:{SLEEP_MINUTE:02d} – {WAKE_HOUR:02d}:{WAKE_MINUTE:02d}</b></div>
@@ -988,6 +1043,29 @@ async function loadHistory(id){{
 {'; '.join([f"loadHistory('{r['id']}')" for r in robots])};
 // Reload every 90s
 setTimeout(()=>location.reload(), 90000);
+async function rebootRobot(id){{
+  if(!confirm('Reboot '+id+'? It will reconnect in ~30 seconds.'))return;
+  await fetch('/reboot',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{robot_id:id}})}});
+  toast('🔄 Reboot queued for '+id);
+}}
+async function shutdownRobot(id){{
+  if(!confirm('Put '+id+' to sleep? Wake it manually by rebooting.'))return;
+  await fetch('/shutdown',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{robot_id:id}})}});
+  toast('⏹️ Sleep queued for '+id);
+}}
+async function saveSDConfig(id){{
+  const name = document.getElementById('sd_name_'+id)?.value?.trim();
+  const vad  = document.getElementById('sd_vad_'+id)?.value;
+  const kid  = document.getElementById('sd_kid_'+id)?.value?.trim();
+  const mode = document.getElementById('sd_mode_'+id)?.value;
+  const body = {{robot_id:id}};
+  if(name) body.robot_name      = name;
+  if(vad)  body.vad_threshold   = parseInt(vad);
+  if(kid)  body.kid_name        = kid;
+  if(mode) body.default_mode    = mode;
+  const r = await api('/config/set','POST', body);
+  if(r&&r.ok) toast('💾 Config queued — robot writes to SD on next poll');
+}}
 async function forceUpd(id){{
   await fetch('/ota/force',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{robot_id:id}})}});
   toast('⬆️ Update queued for '+id);
@@ -1182,12 +1260,74 @@ def web_chat():
         if acquired:
             _chat_lock.release()
 
+
+@app.route("/config/set", methods=["POST"])
+def set_config():
+    """
+    Queue a config update for a robot.
+    Robot writes it to SD card on next /pending poll.
+    Body: { robot_id, vad_threshold, kid_name, speaker_volume, default_mode, robot_name }
+    """
+    data     = request.json or {}
+    robot_id = data.get("robot_id", "robot1")
+    char     = CHARACTERS.get(robot_id, list(CHARACTERS.values())[0])
+    tld      = char.get("voice_tld", "com.au")
+
+    # Build config payload — only include fields that were sent
+    config = {}
+    if "vad_threshold"  in data: config["vad_threshold"]  = int(data["vad_threshold"])
+    if "kid_name"       in data: config["kid_name"]        = str(data["kid_name"])
+    if "speaker_volume" in data: config["speaker_volume"]  = int(data["speaker_volume"])
+    if "default_mode"   in data: config["default_mode"]    = str(data["default_mode"])
+    if "robot_name"     in data: config["robot_name"]      = str(data["robot_name"])
+
+    if not config:
+        return {"error": "no config fields provided"}, 400
+
+    # Update robot_state too so dashboard reflects change immediately
+    if "speaker_volume" in config:
+        robot_state[robot_id]["volume"] = config["speaker_volume"]
+    if "default_mode" in config:
+        robot_state[robot_id]["mode"] = config["default_mode"]
+
+    # Queue for robot to pick up and write to SD card
+    robot_queue[robot_id].append({"action": f"save_config:{json.dumps(config)}", "pcm": None})
+    log.info(f"[Config] Queued SD card update for {robot_id}: {config}")
+    return {"status": "queued", "robot_id": robot_id, "config": config}
+
+@app.route("/reboot", methods=["POST"])
+def reboot_robot():
+    """Queue a reboot action for a robot."""
+    robot_id = (request.json or {}).get("robot_id", request.args.get("robot_id","robot1"))
+    char = CHARACTERS.get(robot_id, list(CHARACTERS.values())[0])
+    tld  = char.get("voice_tld","com.au")
+    pcm  = tts_pcm("Rebooting now. See you in a moment!", tld)
+    robot_queue[robot_id].insert(0, {"action": "reboot", "pcm": pcm})
+    log.info(f"[Dashboard] Reboot queued for {robot_id}")
+    return {"status": "queued", "robot_id": robot_id}
+
+@app.route("/shutdown", methods=["POST"])
+def shutdown_robot():
+    """Queue a deep sleep / shutdown action for a robot."""
+    robot_id = (request.json or {}).get("robot_id", request.args.get("robot_id","robot1"))
+    char = CHARACTERS.get(robot_id, list(CHARACTERS.values())[0])
+    tld  = char.get("voice_tld","com.au")
+    pcm  = tts_pcm("Going to sleep now. Goodnight!", tld)
+    robot_queue[robot_id].insert(0, {"action": "shutdown", "pcm": pcm})
+    log.info(f"[Dashboard] Shutdown queued for {robot_id}")
+    return {"status": "queued", "robot_id": robot_id}
+
 @app.route("/ota/force", methods=["POST"])
 def ota_force():
     robot_id = (request.json or {}).get("robot_id", request.args.get("robot_id","robot1"))
     robot_queue[robot_id].insert(0, {"action": "force_update", "pcm": None})
     log.info(f"[OTA] Force update queued for {robot_id}")
     return {"status": "queued", "robot_id": robot_id}
+
+@app.route("/kidchat")
+def kidchat_page():
+    """Browser-based voice chat for kids — hold to talk, robot talks back."""
+    return send_file(Path(__file__).parent / "kidchat.html")
 
 if __name__ == "__main__":
     log.info("━" * 48)

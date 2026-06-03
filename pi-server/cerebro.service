@@ -1,5 +1,5 @@
 [Unit]
-Description=Project Cortex — Cerebro
+Description=Cerebro AI Robot Server
 After=network.target
 
 [Service]
@@ -7,8 +7,9 @@ Type=simple
 User=YOUR_USERNAME
 WorkingDirectory=/home/YOUR_USERNAME/cerebro
 ExecStart=/home/YOUR_USERNAME/cerebro/venv/bin/python /home/YOUR_USERNAME/cerebro/cerebro.py
-Restart=on-failure
+Restart=always
 RestartSec=5
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
